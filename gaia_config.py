@@ -5,12 +5,11 @@
 import copy
 import os
 from ConfigParser import RawConfigParser
-from abc import abstractmethod
 from datetime import datetime
 
 
 class ConfigItem(str):
-    def __init__(self, key, value, source, last_update_time):
+    def __new__(cls, key, value, source, last_update_time):
         """
         :param key:
         :type key: str
@@ -21,10 +20,11 @@ class ConfigItem(str):
         :param last_update_time:
         :type last_update_time: datetime
         """
-        str.__init__(value)
-        self.key = key
-        self.source = source
-        self.last_update_time = last_update_time
+        item = str.__new__(cls, value.strip())
+        item.key = key.strip()
+        item.source = source.strip()
+        item.last_update_time = last_update_time
+        return item
 
     def as_int(self):
         """
@@ -40,19 +40,13 @@ class ConfigItem(str):
         """
         return float(self)
 
-    def as_bool(self):
-        """
-
-        :return:
-        :rtype: bool
-        """
-        return bool(self)
-
     def as_str_list(self):
         """
         :return:
         ":rtype: list of str
         """
+        if self == '':
+            return []
         return self.split(',')
 
     def as_int_list(self):
@@ -60,7 +54,7 @@ class ConfigItem(str):
         :return:
         ":rtype: list of int
         """
-        ret = self.split(',')
+        ret = self.as_str_list()
         for i in range(0, len(ret)):
             ret[i] = int(ret[i])
         return ret
@@ -71,28 +65,28 @@ class ConfigItem(str):
         :return:
         ":rtype: list of float
         """
-        ret = self.split(',')
+        ret = self.as_str_list()
         for i in range(0, len(ret)):
             ret[i] = float(ret[i])
         return ret
 
 
-class BaseConfiguration(object):
+class BaseConfig(object):
     def __init__(self, name, base_config, item_dict=None):
         """
         :param name:
         :type name: str
         :param base_config:
-        :type base_config: BaseConfiguration
+        :type base_config: BaseConfig
         :param item_dict:
         :type item_dict: dict
         """
         self.name = name
         self.base_config = base_config
         if item_dict is None:
-            self.item_dict = dict()
+            self.__item_dict = dict()
         else:
-            self.item_dict = item_dict
+            self.__item_dict = item_dict
 
     def __getitem__(self, key):
         """
@@ -102,7 +96,7 @@ class BaseConfiguration(object):
         ":rtype: ConfigItem
         """
         try:
-            return self.item_dict[key]
+            return self.__item_dict[key]
         except KeyError:
             if self.base_config is None:
                 raise
@@ -116,10 +110,10 @@ class BaseConfiguration(object):
         :rtype: list of str
         """
         if self.base_config is None:
-            return self.item_dict.keys()
+            return self.__item_dict.keys()
         keys = self.base_config.keys()
-        for key in self.item_dict.iterkeys():
-            if key not in self.base_config.item_dict:
+        for key in self.__item_dict.iterkeys():
+            if key not in self.base_config.__item_dict:
                 keys.append(key)
         return keys
 
@@ -129,18 +123,20 @@ class BaseConfiguration(object):
         :return:
         :rtype: list of tuple
         """
-        if self.base_config is None:
-            return self.item_dict.items()
-        ret = self.base_config.items()
-        for k, v in self.item_dict.iteritems():
-            if k not in self.base_config.item_dict:
-                ret.append((k, v))
+        ret = self.__item_dict.items()
+        if self.base_config is not None:
+            for k, v in self.base_config.items():
+                if k not in self.__item_dict:
+                    ret.append((k, v))
         return ret
 
     def reload(self):
         if self.base_config is not None:
             self.base_config.reload()
-        self.do_reload()
+        self._do_reload()
+
+    def _do_reload(self):
+        pass
 
     def copy(self):
         """
@@ -148,11 +144,9 @@ class BaseConfiguration(object):
         :return: a shallow copy of the configuration
         ":rtype: BaseConfiguration
         """
-        return copy.copy(self)
-
-    @abstractmethod
-    def do_reload(self):
-        pass
+        if self.base_config is None:
+            return BaseConfig(self.name, None, self.__item_dict)
+        return BaseConfig(self.name, self.base_config.copy(), self.__item_dict)
 
     def _do_reload_from_dict(self, value_dict):
         """
@@ -160,14 +154,18 @@ class BaseConfiguration(object):
         :param value_dict:
         ":type value_dict: dict
         """
-        item_dict = dict(self.item_dict)
+        old_item_dict = self.__item_dict
+        new_item_dict = dict()
         value_changed = False
         for k, v in value_dict.iteritems():
-            if item_dict.get(k) != v:
-                item_dict[k] = ConfigItem(k, v, self.name, datetime.now())
+            item = old_item_dict.get(k)
+            if item != v:
+                new_item_dict[k] = ConfigItem(k, v, self.name, datetime.now())
                 value_changed = True
-        if value_changed:
-            self.item_dict = item_dict
+            elif item is not None:
+                new_item_dict[k] = item
+        if value_changed or len(new_item_dict) != len(old_item_dict):
+            self.__item_dict = new_item_dict
 
     def _do_reload_from_ini(self, filename):
         """
@@ -175,43 +173,50 @@ class BaseConfiguration(object):
         :param filename:
         :type filename: str
         """
-        item_dict = dict(self.item_dict)
+        old_item_dict = self.__item_dict
+        new_item_dict = dict()
         value_changed = False
         parser = RawConfigParser()
         parser.read(filename)
         for section in parser.sections():
             for k, v in parser.items(section):
                 k = section + '.' + k
-                if item_dict.get(k) != v:
-                    item_dict[k] = ConfigItem(k, v, self.name, datetime.now())
+                item = old_item_dict.get(k)
+                if item != v:
+                    new_item_dict[k] = ConfigItem(k, v, self.name, datetime.now())
                     value_changed = True
-        if value_changed:
-            self.item_dict = item_dict
+                elif item is not None:
+                    new_item_dict[k] = item
+        if value_changed or len(new_item_dict) != len(old_item_dict):
+            self.__item_dict = new_item_dict
 
 
-class DictConfiguration(BaseConfiguration):
-    def __init__(self, name, value_dict, base_config=None):
-        BaseConfiguration.__init__(self, name, base_config)
-        self.value_dict = value_dict
-        self.do_reload()
+class DictConfig(BaseConfig):
+    def __init__(self, name, value_dict=None, base_config=None):
+        BaseConfig.__init__(self, name, base_config)
+        if value_dict is None:
+            self.value_dict = dict()
+        else:
+            self.value_dict = value_dict
+            self._do_reload()
 
-    def do_reload(self):
+    def _do_reload(self):
         self._do_reload_from_dict(self.value_dict)
 
 
-class IniFileConfiguration(BaseConfiguration):
+class IniFileConfig(BaseConfig):
     def __init__(self, filename, base_config=None):
-        BaseConfiguration.__init__(self, filename, base_config)
-        self.do_reload()
+        BaseConfig.__init__(self, filename, base_config)
+        self._do_reload()
 
-    def do_reload(self):
+    def _do_reload(self):
         self._do_reload_from_ini(self.name)
 
 
-class SystemEnvConfiguration(BaseConfiguration):
+class SystemEnvConfig(BaseConfig):
     def __init__(self, base_config=None):
-        BaseConfiguration.__init__(self, "System Environment", base_config)
-        self.do_reload()
+        BaseConfig.__init__(self, "System Environment", base_config)
+        self._do_reload()
 
-    def do_reload(self):
+    def _do_reload(self):
         self._do_reload_from_dict(os.environ)
