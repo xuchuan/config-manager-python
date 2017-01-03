@@ -6,10 +6,11 @@ from datetime import datetime
 
 import collections
 
+import test_utils
 from gaia_config import ConfigItem, BaseConfig, DictConfig, IniFileConfig
 
 
-class TestConfigItem(unittest.TestCase):
+class TestConfigItem(test_utils.ConcurrentTestCase):
     def test___new__(self):
         now = datetime.now()
         config_item = ConfigItem("k", "v", "s", now)
@@ -79,6 +80,10 @@ class TestConfigItem(unittest.TestCase):
         self.assertEqual(config_item.as_float_list(), [])
 
 
+class Empty:
+    pass
+
+
 class TestBaseConfig(unittest.TestCase):
     def setUp(self):
         self.base_dict = {'k': 'v', 'k1': 'v'}
@@ -134,6 +139,138 @@ class TestBaseConfig(unittest.TestCase):
         self.assertEqual('base', config.base_config.name)
         self.assertIsNone(config.base_config.base_config)
         self.assertEqual(self.base_dict, config.base_config._BaseConfig__item_dict)
+
+    def test_bind(self):
+        obj = Empty()
+        self.config.bind('k1', obj, 'k1')
+        self.assertEqual(obj.k1, 'v1')
+        self.config._do_reload = lambda: self.dict.pop('k1', None)
+        self.config.reload()
+        self.assertEqual(obj.k1, 'v')
+
+    def test_bind_different_method(self):
+        obj = Empty()
+        self.config.bind('x', obj, 'x', 'as_int')
+        self.assertIsNone(obj.x)
+        self.base_dict['x'] = '1234'
+        self.config.reload()
+        self.assertEqual(obj.x, 1234)
+
+    def test_bind_set_value_failure(self):
+        obj = Empty()
+        self.assertRaises(ValueError, self.config.bind, 'k', obj, 'k', 'as_int')
+
+    def test_bind_default_value(self):
+        obj = Empty()
+        self.config.bind('x', obj, 'x', 'as_int', 4321)
+        self.assertEqual(obj.x, 4321)
+        self.base_dict['x'] = '1234'
+        self.config.reload()
+        self.assertEqual(obj.x, 1234)
+        del self.base_dict['x']
+        self.config.reload()
+        self.assertEqual(obj.x, 4321)
+
+    def test_unbind(self):
+        obj = Empty()
+        self.config.bind('k', obj, 'k')
+        self.assertEqual(obj.k, 'v')
+        self.config.unbind('k')
+        self.assertIsNone(obj.k)
+        self.base_dict['k'] = ''
+        self.config.reload()
+        self.assertIsNone(obj.k)
+
+    def test_unbind_invalid_key(self):
+        self.assertRaises(KeyError, self.config.unbind, 'no_such_key')
+
+    def test_reload(self):
+        self.base_dict['kk'] = 'vv'
+        self.config._do_reload = lambda: self.dict.pop('k1', None)
+        self.config.reload()
+        self.assertEqual(self.config['kk'], 'vv')
+        self.assertEqual(self.config['k1'], 'v')
+
+    def test_reload_update_bind(self):
+        self.base_dict['kk'] = 'vv'
+        self.base_dict['k1'] = 'v2'
+        del self.base_dict['k']
+        self.config._do_reload = lambda: self.dict.pop('k1', None) and self.dict.update(k2='vv2', k4='v4')
+        obj = Empty()
+        self.config.bind('k', obj, 'k')
+        self.config.bind('kk', obj, 'kk')
+        self.config.bind('k1', obj, 'k1')
+        self.config.bind('k2', obj, 'k2')
+        self.config.bind('k4', obj, 'k4')
+        self.assertEqual(obj.k, 'v')
+        self.assertIsNone(obj.kk)
+        self.assertEqual(obj.k1, 'v1')
+        self.assertEqual(obj.k2, 'v2')
+        self.assertIsNone(obj.k4)
+        self.config.reload()
+        self.assertIsNone(obj.k)
+        self.assertEqual(obj.kk, 'vv')
+        self.assertEqual(obj.k1, 'v2')
+        self.assertEqual(obj.k2, 'vv2')
+        self.assertEqual(obj.k4, 'v4')
+
+    def test_reload_bind_failure(self):
+        obj = Empty()
+        self.config.bind('u', obj, 'u', )
+        self.config.bind('v', obj, 'v', )
+        self.config.bind('w', obj, 'w', )
+        self.config.bind('x', obj, 'x', 'as_int')
+        self.config.bind('y', obj, 'y', 'as_int')
+        self.config.bind('z', obj, 'z', )
+        self.base_dict['u'] = 'a'
+        self.base_dict['v'] = 'b'
+        self.base_dict['w'] = 'c'
+        self.base_dict['x'] = 'd'
+        self.base_dict['y'] = 'e'
+        self.base_dict['z'] = 'f'
+        bind_failure = self.config.reload()
+        self.assertEqual(len(bind_failure), 2)
+        self.assertEqual(obj.u, 'a')
+        self.assertEqual(obj.v, 'b')
+        self.assertEqual(obj.w, 'c')
+        self.assertIsNone(obj.x)
+        self.assertIsNone(obj.y)
+        self.assertEqual(obj.z, 'f')
+
+
+class TestBaseConfigMultiThread(test_utils.ConcurrentTestCase):
+    def test_multi_thread(self):
+        base_dict = dict()
+        base_config = DictConfig("base", base_dict)
+        config_dict = dict()
+        config = BaseConfig("test", base_config, config_dict)
+
+        max_tasks = 100
+        max_rounds_per_task = 10
+        max_variables = 30
+
+        def create_task(task_id):
+            def run():
+                obj = Empty()
+                key_prefix = 'key%d_' % task_id
+                for i in range(0, max_rounds_per_task):
+                    for j in range(0, max_variables):
+                        if i > 0:
+                            key = '%s%d' % (key_prefix, i - 1 + j)
+                            config.unbind(key)
+                            del config_dict[key]
+                    for j in range(0, max_variables):
+                        key = '%s%d' % (key_prefix, i + j)
+                        config.bind(key, obj, key)
+                        config_dict[key] = key
+                    config.reload()
+                    for j in range(0, max_variables):
+                        key = '%s%d' % (key_prefix, i + j)
+                        self.assertEqual(getattr(obj, key), key)
+
+            return run
+
+        self.assertConcurrent('multi', [create_task(i) for i in range(1, max_tasks + 1)], 30)
 
 
 class TestDictConfig(unittest.TestCase):

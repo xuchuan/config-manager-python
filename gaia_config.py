@@ -2,8 +2,8 @@
 
 """
 
-import copy
 import os
+import threading
 from ConfigParser import RawConfigParser
 from datetime import datetime
 
@@ -27,16 +27,24 @@ class ConfigItem(str):
         return item
 
     def as_int(self):
-        """
-        :return:
-        :rtype: int
+        """ Returns the integer represented by the config item value.
+
+        Returns:
+            int. the integer represented by the config item value.
+
+        Raises:
+            ValueError: if the config item value can not be converted to an integer.
         """
         return int(self)
 
     def as_float(self):
-        """
-        :return:
-        :rtype: float
+        """ Returns the float represented by the config item value.
+
+        Returns:
+            float. the float represented by the config item value.
+
+        Raises:
+            ValueError: if the config item value can not be converted to a float.
         """
         return float(self)
 
@@ -87,6 +95,8 @@ class BaseConfig(object):
             self.__item_dict = dict()
         else:
             self.__item_dict = item_dict
+        self.__bind_dict = dict()
+        self.__lock = threading.Lock()
 
     def __getitem__(self, key):
         """
@@ -111,11 +121,7 @@ class BaseConfig(object):
         """
         if self.base_config is None:
             return self.__item_dict.keys()
-        keys = self.base_config.keys()
-        for key in self.__item_dict.iterkeys():
-            if key not in self.base_config.__item_dict:
-                keys.append(key)
-        return keys
+        return list(set(self.__item_dict.keys()) | set(self.base_config.keys()))
 
     def items(self):
         """
@@ -123,72 +129,153 @@ class BaseConfig(object):
         :return:
         :rtype: list of tuple
         """
-        ret = self.__item_dict.items()
+        item_dict = self.__item_dict
+        ret = item_dict.items()
         if self.base_config is not None:
             for k, v in self.base_config.items():
-                if k not in self.__item_dict:
+                if k not in item_dict:
                     ret.append((k, v))
         return ret
 
-    def reload(self):
-        if self.base_config is not None:
-            self.base_config.reload()
-        self._do_reload()
+    def __update_bound_attr(self, key):
+        obj, attr, method, default_value = self.__bind_dict[key]
+        try:
+            value = self.__getitem__(key)
+            if method is None:
+                setattr(obj, attr, str(value))
+            else:
+                setattr(obj, attr, getattr(value, method)())
+        except KeyError:
+            setattr(obj, attr, default_value)
+
+    def bind(self, key, obj, attr, method=None, default_value=None):
+        """Bind the configuration key to an attribute. When the configuration value is updated, the associated attribute
+        will be updated accordingly. The attribute value will be updated in this method.
+
+        Aware that all bound attributes are updated one by one. You SHOULD NEVER assume that multiple attributes will be
+        updated simultaneously.
+
+        Usage:
+            # bind 'data_path' to data_store.data_path
+            bind('data_path', data_store, 'data_path')
+
+            # bind 'buffer_size' to channel.buffer_size. Type is int and default value is 4096.
+            bind('buffer_size', channel, 'buffer_size', 'as_int', 4096)
+
+        Args:
+            key (str): The key to bind
+            obj (object): The object to whose attribute to be bound
+            attr (str): The name of the attribute to be bound
+            method (str): The name of a ConfigItem method for type conversion(name starts with 'as_'). If it is None, no
+                conversion will be done. That is, the value will be a str.
+            default_value (object): the default value to set if the key does not exist in the configuration.
+
+        Raises:
+            TypeError: if method is not None and is not of type str
+            ValueError: if method is not None and is not a method for type conversion(name starts with 'as_')
+        """
+        with self.__lock:
+            if method is not None:
+                if type(method) is not str:
+                    raise TypeError('method should be of str type')
+                if not method.startswith('as_') and not callable(getattr(ConfigItem, method, None)):
+                    raise ValueError('Invalid method ' + method)
+            self.__bind_dict[key] = (obj, attr, method, default_value)
+            self.__update_bound_attr(key)
+
+    def unbind(self, key):
+        """Unbind the key from its associated attribute. Restore the attribute to its default value as specified when
+        bound.
+
+        Args:
+            key(str): The key to unbind
+
+        Raises:
+            KeyError: if the key has not been bound to any attribute
+        """
+        with self.__lock:
+            obj, attr, method, default_value = self.__bind_dict.pop(key)
+            setattr(obj, attr, default_value)
+
+    def reload(self, update_bind=True):
+        with self.__lock:
+            if self.base_config is not None:
+                self.base_config.reload(False)
+            self._do_reload()
+            if not update_bind:
+                return
+
+            bind_failure = []
+            for k in self.__bind_dict.iterkeys():
+                try:
+                    self.__update_bound_attr(k)
+                except ValueError as e:
+                    bind_failure.append(e)
+            if len(bind_failure) > 0:
+                return bind_failure
 
     def _do_reload(self):
         pass
 
+    def _get_item_dict(self):
+        return dict(self.__item_dict)
+
+    def _set_item_dict(self, item_dict):
+        self.__item_dict = dict(item_dict)
+
     def copy(self):
-        """
-        Returns a shallow copy of the configuration
-        :return: a shallow copy of the configuration
-        ":rtype: BaseConfiguration
+        """Returns a shallow copy of this configuration
+
+        Returns:
+            BaseConfiguration. a shallow copy of this configuration
         """
         if self.base_config is None:
             return BaseConfig(self.name, None, self.__item_dict)
         return BaseConfig(self.name, self.base_config.copy(), self.__item_dict)
 
-    def _do_reload_from_dict(self, value_dict):
-        """
 
-        :param value_dict:
-        ":type value_dict: dict
-        """
-        old_item_dict = self.__item_dict
-        new_item_dict = dict()
-        value_changed = False
-        for k, v in value_dict.iteritems():
-            item = old_item_dict.get(k)
+def update_from_dict(source, item_dict, value_dict):
+    """
+    :param source:
+    :type source: str
+    :param item_dict:
+    :type item_dict: dict
+    :param value_dict:
+    ":type value_dict: dict
+    """
+    now = datetime.now()
+    for k, v in value_dict.iteritems():
+        item = item_dict.get(k)
+        if item != v:
+            item_dict[k] = ConfigItem(k, v, source, now)
+    for k in item_dict.keys():
+        if k not in value_dict:
+            del item_dict[k]
+
+
+def update_from_ini(source, item_dict, filename):
+    """
+    :param source:
+    :type source: str
+    :param item_dict:
+    :type item_dict: dict
+    :param filename:
+    :type filename: str
+    """
+    parser = RawConfigParser()
+    parser.read(filename)
+    now = datetime.now()
+    keys = set()
+    for section in parser.sections():
+        for k, v in parser.items(section):
+            k = section + '.' + k
+            keys.add(k)
+            item = item_dict.get(k)
             if item != v:
-                new_item_dict[k] = ConfigItem(k, v, self.name, datetime.now())
-                value_changed = True
-            elif item is not None:
-                new_item_dict[k] = item
-        if value_changed or len(new_item_dict) != len(old_item_dict):
-            self.__item_dict = new_item_dict
-
-    def _do_reload_from_ini(self, filename):
-        """
-
-        :param filename:
-        :type filename: str
-        """
-        old_item_dict = self.__item_dict
-        new_item_dict = dict()
-        value_changed = False
-        parser = RawConfigParser()
-        parser.read(filename)
-        for section in parser.sections():
-            for k, v in parser.items(section):
-                k = section + '.' + k
-                item = old_item_dict.get(k)
-                if item != v:
-                    new_item_dict[k] = ConfigItem(k, v, self.name, datetime.now())
-                    value_changed = True
-                elif item is not None:
-                    new_item_dict[k] = item
-        if value_changed or len(new_item_dict) != len(old_item_dict):
-            self.__item_dict = new_item_dict
+                item_dict[k] = ConfigItem(k, v, source, now)
+    for k in item_dict.keys():
+        if k not in keys:
+            del item_dict[k]
 
 
 class DictConfig(BaseConfig):
@@ -201,7 +288,9 @@ class DictConfig(BaseConfig):
             self._do_reload()
 
     def _do_reload(self):
-        self._do_reload_from_dict(self.value_dict)
+        item_dict = self._get_item_dict()
+        update_from_dict(self.name, item_dict, self.value_dict)
+        self._set_item_dict(item_dict)
 
 
 class IniFileConfig(BaseConfig):
@@ -210,7 +299,9 @@ class IniFileConfig(BaseConfig):
         self._do_reload()
 
     def _do_reload(self):
-        self._do_reload_from_ini(self.name)
+        item_dict = self._get_item_dict()
+        update_from_ini(self.name, item_dict, self.name)
+        self._set_item_dict(item_dict)
 
 
 class SystemEnvConfig(BaseConfig):
@@ -219,4 +310,6 @@ class SystemEnvConfig(BaseConfig):
         self._do_reload()
 
     def _do_reload(self):
-        self._do_reload_from_dict(os.environ)
+        item_dict = self._get_item_dict()
+        update_from_dict(self.name, item_dict, os.environ)
+        self._set_item_dict(item_dict)
