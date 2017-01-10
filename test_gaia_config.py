@@ -171,18 +171,77 @@ class TestBaseConfig(unittest.TestCase):
         self.config.reload()
         self.assertEqual(obj.x, 4321)
 
-    def test_unbind(self):
+    def test_bind_single_key_multiple_value(self):
+        obj1 = Empty()
+        obj2 = Empty()
+        self.config.bind('k1', obj1, 'k1')
+        self.config.bind('k1', obj1, 'k2')
+        self.config.bind('k1', obj2, 'k3')
+        self.assertEqual(obj1.k1, 'v1')
+        self.assertEqual(obj1.k2, 'v1')
+        self.assertEqual(obj2.k3, 'v1')
+        self.config._do_reload = lambda: self.dict.pop('k1', None)
+        self.config.reload()
+        self.assertEqual(obj1.k1, 'v')
+        self.assertEqual(obj1.k2, 'v')
+        self.assertEqual(obj2.k3, 'v')
+
+    def test_unbind_all(self):
         obj = Empty()
         self.config.bind('k', obj, 'k')
         self.assertEqual(obj.k, 'v')
-        self.config.unbind('k')
+        self.config.unbind_all('k')
         self.assertIsNone(obj.k)
         self.base_dict['k'] = ''
         self.config.reload()
         self.assertIsNone(obj.k)
 
-    def test_unbind_invalid_key(self):
-        self.assertRaises(KeyError, self.config.unbind, 'no_such_key')
+    def test_unbind_all_multiple_attributes(self):
+        obj1 = Empty()
+        obj2 = Empty()
+        self.config.bind('k', obj1, 'k1')
+        self.config.bind('k', obj1, 'k2')
+        self.config.bind('k', obj2, 'k3')
+        self.assertEqual(obj1.k1, 'v')
+        self.assertEqual(obj1.k2, 'v')
+        self.assertEqual(obj2.k3, 'v')
+        self.config.unbind_all('k')
+        self.assertIsNone(obj1.k1)
+        self.assertIsNone(obj1.k2)
+        self.assertIsNone(obj2.k3)
+        self.base_dict['k'] = ''
+        self.config.reload()
+        self.assertIsNone(obj1.k1)
+        self.assertIsNone(obj1.k2)
+        self.assertIsNone(obj2.k3)
+
+    def test_unbind_all_invalid_key(self):
+        self.assertRaises(KeyError, self.config.unbind_all, 'no_such_key')
+
+    def test_unbind_one(self):
+        obj = Empty()
+        self.config.bind('k', obj, 'k')
+        self.assertEqual(obj.k, 'v')
+        self.config.unbind_one('k', obj, 'k')
+        self.assertIsNone(obj.k)
+        self.base_dict['k'] = ''
+        self.config.reload()
+        self.assertIsNone(obj.k)
+
+    def test_unbind_one_invalid_key(self):
+        obj = Empty()
+        self.config.bind('k', obj, 'k')
+        self.assertRaises(KeyError, self.config.unbind_one, 'no_such_key', obj, 'k')
+
+    def test_unbind_one_unmatched_obj(self):
+        obj = Empty()
+        self.config.bind('k', obj, 'k')
+        self.assertRaises(KeyError, self.config.unbind_one, 'k', Empty(), 'k')
+
+    def test_unbind_one_unmatched_attr(self):
+        obj = Empty()
+        self.config.bind('k', obj, 'k')
+        self.assertRaises(KeyError, self.config.unbind_one, 'k', obj, 'k1')
 
     def test_reload(self):
         self.base_dict['kk'] = 'vv'
@@ -245,7 +304,7 @@ class TestBaseConfigMultiThread(test_utils.ConcurrentTestCase):
         config_dict = dict()
         config = BaseConfig("test", base_config, config_dict)
 
-        max_tasks = 100
+        max_tasks = 50
         max_rounds_per_task = 10
         max_variables = 30
 
@@ -257,7 +316,10 @@ class TestBaseConfigMultiThread(test_utils.ConcurrentTestCase):
                     for j in range(0, max_variables):
                         if i > 0:
                             key = '%s%d' % (key_prefix, i - 1 + j)
-                            config.unbind(key)
+                            if i % 2 == 0:
+                                config.unbind_one(key, obj, key)
+                            else:
+                                config.unbind_all(key)
                             del config_dict[key]
                     for j in range(0, max_variables):
                         key = '%s%d' % (key_prefix, i + j)
